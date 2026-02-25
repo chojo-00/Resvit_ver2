@@ -72,6 +72,10 @@ class ResViT_model(BaseModel):
             for optimizer in self.optimizers:
                 self.schedulers.append(networks.get_scheduler(optimizer, opt))
 
+            # [추가] continue_train 시 optimizer/scheduler 상태 복원
+            if opt.continue_train:
+                self.load_training_state(opt.which_epoch)
+
         print('---------- Networks initialized -------------')
         networks.print_network(self.netG)
         if self.isTrain:
@@ -195,3 +199,5 @@ class ResViT_model(BaseModel):
     def save(self, label):
         self.save_network(self.netG, 'G', label, self.gpu_ids)
         self.save_network(self.netD, 'D', label, self.gpu_ids)
+        # [추가] optimizer/scheduler 상태도 함께 저장
+        self.save_training_state(label)

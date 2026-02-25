@@ -9,12 +9,27 @@ from util.visualizer import Visualizer
 import numpy as np, h5py 
 from skimage.metrics import peak_signal_noise_ratio as psnr
 import os
+import wandb
+
 def print_log(logger,message):
     print(message, flush=True)
     if logger:
         logger.write(str(message) + '\n')
+
 if __name__ == '__main__':
     opt = TrainOptions().parse()
+
+    # =========================================================
+    # [추가] wandb 초기화
+    # =========================================================
+    wandb_run = wandb.init(
+        project="ResViT-DECT",
+        name=opt.name,
+        config=vars(opt),
+        resume="allow",
+    )
+    print(f"[wandb] Run URL: {wandb_run.url}")
+
     #Training data
     data_loader = CreateDataLoader(opt)
     dataset = data_loader.load_data()
@@ -25,18 +40,28 @@ if __name__ == '__main__':
     logger = open(os.path.join(save_dir, 'log.txt'), 'w+')
     print_log(logger,opt.name)
     logger.close()
-    #validation data
-    opt.phase='val'
-    data_loader_val = CreateDataLoader(opt)
-    dataset_val = data_loader_val.load_data()
-    dataset_size_val = len(data_loader_val)
-    print('#Validation images = %d' % dataset_size)
-    if opt.model=='cycle_gan':
-        L1_avg=np.zeros([2,opt.niter + opt.niter_decay,len(dataset_val)])      
-        psnr_avg=np.zeros([2,opt.niter + opt.niter_decay,len(dataset_val)])            
+
+    # =========================================================
+    # [수정] validation data — 폴더 존재 시에만 로드
+    # =========================================================
+    val_dir = os.path.join(opt.dataroot, 'val')
+    use_val = os.path.isdir(val_dir) and len(os.listdir(val_dir)) > 0
+    if use_val:
+        opt.phase='val'
+        data_loader_val = CreateDataLoader(opt)
+        dataset_val = data_loader_val.load_data()
+        dataset_size_val = len(data_loader_val)
+        print('#Validation images = %d' % dataset_size_val)
+        if opt.model=='cycle_gan':
+            L1_avg=np.zeros([2,opt.niter + opt.niter_decay,len(dataset_val)])      
+            psnr_avg=np.zeros([2,opt.niter + opt.niter_decay,len(dataset_val)])            
+        else:
+            L1_avg=np.zeros([opt.niter + opt.niter_decay,len(dataset_val)])      
+            psnr_avg=np.zeros([opt.niter + opt.niter_decay,len(dataset_val)])
+        opt.phase='train'  # phase 복원
     else:
-        L1_avg=np.zeros([opt.niter + opt.niter_decay,len(dataset_val)])      
-        psnr_avg=np.zeros([opt.niter + opt.niter_decay,len(dataset_val)])       
+        print('[Info] No validation folder found at %s, skipping validation.' % val_dir)
+
     model = create_model(opt)
     visualizer = Visualizer(opt)
     total_steps = 0
@@ -88,54 +113,78 @@ if __name__ == '__main__':
                 if opt.display_id > 0:
                     visualizer.plot_current_errors(epoch, float(epoch_iter) / dataset_size, opt, errors)
 
+                # [추가] wandb 학습 loss 로깅
+                wandb_log = {"epoch": epoch, "iter": total_steps}
+                for k, v in errors.items():
+                    wandb_log[f"train/{k}"] = v
+                wandb_log["train/lr"] = model.optimizers[0].param_groups[0]['lr']
+                wandb.log(wandb_log, step=total_steps)
+
             if total_steps % opt.save_latest_freq == 0:
                 print('saving the latest model (epoch %d, total_steps %d)' %
                       (epoch, total_steps))
                 model.save('latest')
 
             iter_data_time = time.time()
+
         #Validaiton step
         if epoch % opt.save_epoch_freq == 0:
-            logger = open(os.path.join(save_dir, 'log.txt'), 'a')
-            print(opt.dataset_mode)
-            opt.phase='val'
-            for i, data_val in enumerate(dataset_val):
-#        		    
-                model.set_input(data_val)
-#        		    
-                model.test()
-#        		    
-                fake_im=model.fake_B.cpu().data.numpy()
-#        		    
-                real_im=model.real_B.cpu().data.numpy() 
-#        		    
-                real_im=real_im*0.5+0.5
-#        		    
-                fake_im=fake_im*0.5+0.5
-                if real_im.max() <= 0:
-                    continue
-                L1_avg[epoch-1,i]=abs(fake_im-real_im).mean()
-                psnr_avg[epoch-1,i]=psnr(fake_im/fake_im.max(),real_im/real_im.max())
-#                  
-#                 
-            l1_avg_loss = np.mean(L1_avg[epoch-1])
-#                
-            mean_psnr = np.mean(psnr_avg[epoch-1])
-#                
-            std_psnr = np.std(psnr_avg[epoch-1])
-#                
-            print_log(logger,'Epoch %3d   l1_avg_loss: %.5f   mean_psnr: %.3f  std_psnr:%.3f ' % \
-            (epoch, l1_avg_loss, mean_psnr,std_psnr))
-#                
-            print_log(logger,'')
-            logger.close()
-    		   #
+            # =========================================================
+            # [수정] validation — use_val일 때만 실행
+            # =========================================================
+            if use_val:
+                logger = open(os.path.join(save_dir, 'log.txt'), 'a')
+                print(opt.dataset_mode)
+                opt.phase='val'
+                for i, data_val in enumerate(dataset_val):
+                    model.set_input(data_val)
+                    model.test()
+                    fake_im=model.fake_B.cpu().data.numpy()
+                    real_im=model.real_B.cpu().data.numpy() 
+                    real_im=real_im*0.5+0.5
+                    fake_im=fake_im*0.5+0.5
+                    if real_im.max() <= 0:
+                        continue
+                    L1_avg[epoch-1,i]=abs(fake_im-real_im).mean()
+                    psnr_avg[epoch-1,i]=psnr(fake_im/fake_im.max(),real_im/real_im.max())
+
+                l1_avg_loss = np.mean(L1_avg[epoch-1])
+                mean_psnr = np.mean(psnr_avg[epoch-1])
+                std_psnr = np.std(psnr_avg[epoch-1])
+                print_log(logger,'Epoch %3d   l1_avg_loss: %.5f   mean_psnr: %.3f  std_psnr:%.3f ' % \
+                (epoch, l1_avg_loss, mean_psnr,std_psnr))
+                print_log(logger,'')
+                logger.close()
+
+                # [추가] wandb validation 로깅
+                wandb.log({
+                    "val/l1_avg": l1_avg_loss,
+                    "val/psnr_mean": mean_psnr,
+                    "val/psnr_std": std_psnr,
+                    "epoch": epoch,
+                }, step=total_steps)
+
             print('saving the model at the end of epoch %d, iters %d' %(epoch, total_steps))
-#        		    
             model.save('latest')
-#        		   
             model.save(epoch)
 
+            # [추가] wandb 생성 이미지 샘플 로깅
+            visuals = model.get_current_visuals()
+            wandb.log({
+                "samples/input": wandb.Image(visuals['real_A'], caption="Input (src keV)"),
+                "samples/generated": wandb.Image(visuals['fake_B'], caption="Generated (70keV)"),
+                "samples/ground_truth": wandb.Image(visuals['real_B'], caption="GT (70keV)"),
+                "epoch": epoch,
+            }, step=total_steps)
+
+        epoch_time = time.time() - epoch_start_time
         print('End of epoch %d / %d \t Time Taken: %d sec' %
-              (epoch, opt.niter + opt.niter_decay, time.time() - epoch_start_time))
+              (epoch, opt.niter + opt.niter_decay, epoch_time))
+
+        # [추가] wandb epoch 시간 로깅
+        wandb.log({"epoch_time_sec": epoch_time, "epoch": epoch}, step=total_steps)
+
         model.update_learning_rate()
+
+    # [추가] wandb 종료
+    wandb.finish()

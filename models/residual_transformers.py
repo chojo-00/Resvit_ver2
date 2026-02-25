@@ -285,7 +285,9 @@ class ART_block(nn.Module):
         norm_layer = nn.BatchNorm2d
         padding_type = 'reflect'
         if self.transformer:
+            # =====================================================
             # Downsample
+            # =====================================================
             model = [nn.Conv2d(ngf * 4, ngf * 8, kernel_size=3,
                                stride=2, padding=1, bias=use_bias),
                      norm_layer(ngf * 8),
@@ -294,10 +296,20 @@ class ART_block(nn.Module):
                                 stride=2, padding=1, bias=use_bias),
                       norm_layer(1024),
                       nn.ReLU(True)]
+
+            # [수정] 512×512 전용: downsample 3단계 (128→64→32→16)
+            # 원본 ResViT(256)는 2단계로 16×16 도달, 512에서는 3단계 필요
+            model += [nn.Conv2d(1024, 1024, kernel_size=3,
+                                stride=2, padding=1, bias=use_bias),
+                      norm_layer(1024),
+                      nn.ReLU(True)]
+
             setattr(self, 'downsample', nn.Sequential(*model))
-            #Patch embedings
-            self.embeddings = Embeddings(config, img_size=img_size, input_dim=input_dim)
-            # Upsampling block
+
+            # Patch Embeddings (img_size=256 → k=1, 채널 projection만 수행)
+            self.embeddings = Embeddings(config, img_size=256, input_dim=input_dim)
+
+            # Upsample 3단계 (16→32→64→128, downsample과 대칭)
             model = [nn.ConvTranspose2d(self.config.hidden_size, ngf * 8,
                                         kernel_size=3, stride=2,
                                         padding=1, output_padding=1,
@@ -315,7 +327,8 @@ class ART_block(nn.Module):
                                          padding=1, output_padding=1,
                                          bias=use_bias),
                       norm_layer(ngf * 4),
-                      nn.ReLU(True)]                      
+                      nn.ReLU(True)]
+
             setattr(self, 'upsample', nn.Sequential(*model))
             #Channel compression
             self.cc = channel_compression(ngf * 8, ngf * 4)
@@ -669,5 +682,3 @@ CONFIGS = {
     'Res-ViT-B_16': configs.get_resvit_b16_config(),
     'Res-ViT-L_16': configs.get_resvit_l16_config(),
 }
-
-
