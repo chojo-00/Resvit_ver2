@@ -6,51 +6,46 @@ from data import CreateDataLoader
 from models import create_model
 import re
 import pydicom
+from PIL import Image
+
 
 def parse_filename(filepath):
-    """
-    파일 경로에서 환자 ID와 슬라이스 번호 추출
+    basename = os.path.basename(filepath)
+    name_without_ext = os.path.splitext(basename)[0]
     
-    입력 예시:
-    - /train/70keV/PE001/PE001_0001.dcm
-    - /test/80keV/PE275/PE275_0280.dcm
-    
-    출력: ('PE001', '0001', '70keV')
-    """
-    # 파일명 추출
-    basename = os.path.basename(filepath)  # PE001_0001.dcm
-    
-    # 확장자 제거
-    name_without_ext = os.path.splitext(basename)[0]  # PE001_0001
-    
-    # 패턴: PE{환자번호}_{슬라이스번호}
+    # 1. 기존 데이터 패턴 (예: PE001_0001) 확인
     pattern = r'(PE\d+)_(\d+)'
     match = re.match(pattern, name_without_ext)
     
     if match:
-        patient_id = match.group(1)    # PE001
-        slice_num = match.group(2)     # 0001
+        patient_id = match.group(1)
+        slice_num = match.group(2)
     else:
-        # 폴백: 파일명에서 숫자 추출 시도
-        patient_id = "Unknown"
-        slice_match = re.search(r'(\d+)', name_without_ext)
-        slice_num = slice_match.group(1) if slice_match else '0000'
-    
-    # 경로에서 keV 정보 추출
+        # 2. 새로운 트리 구조 데이터인 경우 (기존 변수명 외 추가 없이 처리)
+        # 두 단계 상위 폴더를 환자 ID로 추출
+        patient_id = os.path.basename(os.path.dirname(os.path.dirname(filepath)))
+        
+        # CT로 시작하지 않는 예외 상황 처리 (기존 slice_match 변수명 재활용)
+        if not patient_id.startswith('CT'):
+            slice_match = re.search(r'(CT\d+)', name_without_ext)
+            if slice_match:
+                patient_id = slice_match.group(1)
+        
+        slice_num = name_without_ext
+        
+    # 3. 경로에서 keV 정보 추출 (기존 path_parts, kev_match 변수명 유지)
     source_kev = 'unknownkeV'
-    path_parts = filepath.split(os.sep)
+    path_parts = filepath.replace('\\', '/').split('/')
     for part in path_parts:
-        if 'keV' in part:
-            # "70keV", "80keV" 등의 형식
-            kev_match = re.search(r'(\d+)\s*keV', part, re.IGNORECASE)
+        if 'kev' in part.lower():
+            kev_match = re.search(r'(\d+)\s*kev', part, re.IGNORECASE)
             if kev_match:
                 source_kev = f"{kev_match.group(1)}keV"
             else:
                 source_kev = part
             break
-    
+            
     return patient_id, slice_num, source_kev
-
 
 def tensor2array(image_tensor, min_hu=-1024.0, max_hu=3071.0):
     """
@@ -161,6 +156,26 @@ def save_ct_image_npy_only(image_array, npy_dir, filename_base):
     return npy_path
 
 
+def save_ct_image_png(image_array, png_dir, filename_base, min_hu=-1024.0, max_hu=3071.0):
+    """
+    CT 이미지(HU)의 전체 범위를 0~255 값으로 단순 선형 변환하여 PNG로 저장
+    """
+    os.makedirs(png_dir, exist_ok=True)
+    
+    # 전체 HU 범위를 0~255로 정규화 (스케일링)
+    img_normalized = (image_array - min_hu) / (max_hu - min_hu) * 255.0
+    
+    # 범위를 벗어나는 값 안전하게 클리핑
+    img_clipped = np.clip(img_normalized, 0, 255)
+    
+    # uint8 타입으로 변환 후 PIL을 이용해 PNG 저장
+    img_uint8 = img_clipped.astype(np.uint8)
+    png_path = os.path.join(png_dir, f"{filename_base}.png")
+    Image.fromarray(img_uint8).save(png_path)
+    
+    return png_path
+
+
 if __name__ == '__main__':
     opt = TestOptions().parse()
     opt.nThreads = 1
@@ -197,7 +212,8 @@ if __name__ == '__main__':
     # npy,dcm base 디렉토리
     npy_base = os.path.join(results_base, 'npy')
     dcm_base = os.path.join(results_base, 'dcm') 
-
+    png_base = os.path.join(results_base, 'png')
+    
     print(f"{'='*80}")
     print(f"🧪 Testing {opt.name} (Numpy Output Only)")
     print(f"{'='*80}")
@@ -206,6 +222,8 @@ if __name__ == '__main__':
     print(f"Total samples to test: {min(opt.how_many, len(dataset))}")
     print(f"Results directory: {results_base}")
     print(f"  - Numpy:  {npy_base}")
+    print(f"  - Dicom:  {dcm_base}")
+    print(f"  - PNG:    {png_base}")
     print(f"{'='*80}\n")
     
     # 통계
@@ -264,10 +282,23 @@ if __name__ == '__main__':
         save_ct_image_npy_only(real_A, npy_real_A_dir, filename_base)
         save_ct_image_npy_only(real_B, npy_real_B_dir, filename_base)
         save_ct_image_npy_only(fake_B, npy_fake_B_dir, filename_base)
+
+
+        # 3. PNG 저장
+        png_kev_dir = os.path.join(png_base, source_kev)
+        png_patient_dir = os.path.join(png_kev_dir, patient_id)
+        png_real_A_dir = os.path.join(png_patient_dir, 'real_A')
+        png_real_B_dir = os.path.join(png_patient_dir, 'real_B')
+        png_fake_B_dir = os.path.join(png_patient_dir, 'fake_B')
+        
+        save_ct_image_png(real_A, png_real_A_dir, filename_base, MIN_HU, MAX_HU)
+        save_ct_image_png(real_B, png_real_B_dir, filename_base, MIN_HU, MAX_HU)
+        save_ct_image_png(fake_B, png_fake_B_dir, filename_base, MIN_HU, MAX_HU)
+
     
     # 최종 통계
     print(f"\n{'='*80}")
-    print(f"✅ Testing Complete (Numpy Only)!")
+    print(f"✅ Testing Complete!")
     print(f"{'='*80}")
     print(f"\n📊 Statistics by Source keV:")
     print(f"{'-'*80}")
@@ -287,6 +318,11 @@ if __name__ == '__main__':
     
     print(f"{'-'*80}")
     print(f"{'Total':<12} {len(all_patients):<15} {total_slices:<10}")
-    print(f"\n📁 Results saved to: {npy_base}")
-    print(f"\n💡 To load:")
+    
+    # 저장 경로를 종류별로 나누어 출력하도록 수정
+    print(f"\n📁 Results saved to:")
+    print(f"  - DCM: {dcm_base}")
+    print(f"  - NPY: {npy_base}")
+    print(f"  - PNG: {png_base}")
+    print(f"\n💡 To load npy:")
     print(f"   img = np.load('PE001_0001.npy')  # Shape: [H, W], dtype: float32")
