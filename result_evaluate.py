@@ -18,7 +18,7 @@ FAKE_B_ROOT = "/workspace/bc_cho/2_Code/ResViT_ver2/results/ct_contrast_ver3/tes
 REAL_B_ROOT = "/workspace/bc_cho/2_Code/ResViT_ver2/datasets/CCY_PE_DECT/journal_data/internal/test/70keV"
 
 # 3. 결과 엑셀 파일 저장 이름
-OUTPUT_EXCEL_NAME = "evaluation_test_metrics_result.xlsx"
+OUTPUT_EXCEL_NAME = "evaluation_test_ver2_metrics_result.xlsx"
 
 # 4. CT HU 범위 (PSNR/SSIM 계산용)
 MIN_HU = -1024.0
